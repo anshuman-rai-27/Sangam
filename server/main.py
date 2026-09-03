@@ -24,74 +24,88 @@ if ROOT not in sys.path:
 
 import httpx
 import numpy as np
-import torch
-import torch.nn as nn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from transformers import GPT2Tokenizer
+from tokenizers import Tokenizer
 
 from server.registry import DeviceRegistry
 from server.room import RoomManager
 from shared.serialization import payload_to_tensor
 
 MODEL_SLICES_DIR = os.environ.get("MODEL_SLICES_DIR", "model_slices").strip()
-TOKENIZER_PATH   = os.environ.get("TOKENIZER_PATH",   "model_slices/tokenizer").strip()
 HF_REPO          = os.environ.get("HF_REPO", "anshumanrai/sangam-gpt2-slices")
 WEB_DIR          = Path(__file__).parent.parent / "web"
 
+GPT2_EOS = 50256
+
 registry     = DeviceRegistry()
 room_manager = RoomManager()
-tokenizer    = None
-server_head  = None   # loaded from server_head.pt if available
+tokenizer: Optional[Tokenizer] = None
+server_head  = None
 
-_room_ws:        Dict[str, Set[WebSocket]]  = {}
-_room_locks:     Dict[str, asyncio.Lock]    = {}
-_pending_forwards: Dict[str, asyncio.Future] = {}
+_room_ws:          Dict[str, Set[WebSocket]]   = {}
+_room_locks:       Dict[str, asyncio.Lock]     = {}
+_pending_forwards: Dict[str, asyncio.Future]   = {}
 
 
 # ─── Float32 helpers (browser ↔ server) ─────────────────────────────────────
 
-def _t2b(t: torch.Tensor) -> Tuple[str, list]:
-    """Tensor → (base64-float32, shape-list)."""
-    arr = t.detach().cpu().float().numpy()
+def _t2b(arr: np.ndarray) -> Tuple[str, list]:
+    """ndarray → (base64-float32, shape-list)."""
+    arr = np.ascontiguousarray(arr, dtype=np.float32)
     return _b64.b64encode(arr.tobytes()).decode(), list(arr.shape)
 
 
-def _b2t(data: str, shape: list) -> torch.Tensor:
-    """base64-float32 + shape → Tensor."""
+def _b2t(data: str, shape: list) -> np.ndarray:
+    """base64-float32 + shape → ndarray."""
     raw = _b64.b64decode(data)
-    arr = np.frombuffer(raw, dtype=np.float32).reshape(shape)
-    return torch.from_numpy(arr.copy())
+    return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
 
 
 # ─── Server head (embedding + LM-head projection) ────────────────────────────
 
 class _ServerHead:
-    """Holds wte, wpe, lm_head — server does embedding and projection."""
+    """Holds wte, wpe — server does embedding lookup and LM-head projection (wte.T)."""
 
     def __init__(self, path: str):
-        data = torch.load(path, map_location="cpu", weights_only=False)
-        self._wte = nn.Embedding(50257, 768)
-        self._wte.load_state_dict(data["wte"])
-        self._wpe = nn.Embedding(1024, 768)
-        self._wpe.load_state_dict(data["wpe"])
-        # LM head shares weights with wte (GPT-2 weight tying)
-        self._lm_head = nn.Linear(768, 50257, bias=False)
-        self._lm_head.weight = self._wte.weight
-        for m in [self._wte, self._wpe, self._lm_head]:
-            m.eval()
+        data = np.load(path)
+        self._wte = data["wte"].astype(np.float32)  # (50257, 768)
+        self._wpe = data["wpe"].astype(np.float32)  # (1024,  768)
+        print(f"[server] server_head: wte={self._wte.shape}, wpe={self._wpe.shape}")
 
-    @torch.no_grad()
     def embed(self, input_ids: list) -> Tuple[str, list]:
-        ids = torch.tensor([input_ids], dtype=torch.long)
-        pos = torch.arange(len(input_ids), dtype=torch.long).unsqueeze(0)
-        return _t2b(self._wte(ids) + self._wpe(pos))
+        ids = np.array(input_ids, dtype=np.int32)
+        n   = len(ids)
+        pos = np.arange(n, dtype=np.int32)
+        hidden = self._wte[ids] + self._wpe[pos]  # (n, 768)
+        hidden = hidden[np.newaxis]               # (1, n, 768)
+        return _t2b(hidden)
 
-    @torch.no_grad()
-    def project(self, data: str, shape: list) -> torch.Tensor:
-        return self._lm_head(_b2t(data, shape))
+    def project(self, data: str, shape: list) -> np.ndarray:
+        hidden = _b2t(data, shape)      # (1, n, 768)
+        return hidden @ self._wte.T     # (1, n, 50257)
+
+
+# ─── Sampling ─────────────────────────────────────────────────────────────────
+
+def _sample_next(logits_row: np.ndarray, temperature: float, top_p: float) -> int:
+    logits_row = logits_row.astype(np.float64) / max(temperature, 1e-6)
+    logits_row -= logits_row.max()
+    probs = np.exp(logits_row)
+    probs /= probs.sum()
+
+    sorted_idx   = np.argsort(probs)[::-1]
+    sorted_probs = probs[sorted_idx]
+    cumulative   = np.cumsum(sorted_probs)
+
+    cutoff = int(np.searchsorted(cumulative - sorted_probs, top_p))
+    sorted_probs[cutoff + 1:] = 0.0
+    sorted_probs /= sorted_probs.sum()
+
+    chosen = int(np.random.choice(len(sorted_probs), p=sorted_probs))
+    return int(sorted_idx[chosen])
 
 
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
@@ -100,18 +114,19 @@ class _ServerHead:
 async def lifespan(app: FastAPI):
     global tokenizer, server_head
 
-    tok_path = TOKENIZER_PATH if os.path.isdir(TOKENIZER_PATH) else "gpt2"
-    tokenizer = GPT2Tokenizer.from_pretrained(tok_path)
-    print(f"[server] tokenizer loaded from '{tok_path}'")
+    # Tokenizer (GPT-2 BPE via tokenizers library — no torch needed)
+    tokenizer = Tokenizer.from_pretrained("gpt2")
+    print("[server] tokenizer loaded (gpt2)")
 
-    head_path = os.path.join(MODEL_SLICES_DIR, "server_head.pt")
+    # Server head weights
+    head_path = os.path.join(MODEL_SLICES_DIR, "server_head.npz")
     if not os.path.isfile(head_path):
-        hf_url = f"https://huggingface.co/{HF_REPO}/resolve/main/server_head.pt"
-        print(f"[server] downloading server_head.pt from {hf_url} …")
+        hf_url = f"https://huggingface.co/{HF_REPO}/resolve/main/server_head.npz"
+        print(f"[server] downloading server_head.npz from {hf_url} …")
         os.makedirs(MODEL_SLICES_DIR, exist_ok=True)
         import urllib.request
         urllib.request.urlretrieve(hf_url, head_path)
-        print("[server] server_head.pt downloaded")
+        print("[server] server_head.npz downloaded")
     server_head = _ServerHead(head_path)
     print("[server] server_head loaded (browser workers enabled)")
 
@@ -138,22 +153,6 @@ async def _broadcast(room_id: str, msg: dict) -> None:
         _room_ws.get(room_id, set()).difference_update(dead)
 
 
-# ─── Sampling ─────────────────────────────────────────────────────────────────
-
-import torch.nn.functional as F
-
-def _sample_next(logits_row: torch.Tensor, temperature: float, top_p: float) -> int:
-    logits_row = logits_row / max(temperature, 1e-6)
-    probs = F.softmax(logits_row, dim=-1)
-    sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-    cumulative = torch.cumsum(sorted_probs, dim=-1)
-    # keep the minimal set whose cumulative prob >= top_p
-    sorted_probs[cumulative - sorted_probs > top_p] = 0.0
-    sorted_probs /= sorted_probs.sum()
-    chosen = sorted_idx[torch.multinomial(sorted_probs, num_samples=1)]
-    return int(chosen)
-
-
 # ─── Inference ────────────────────────────────────────────────────────────────
 
 async def _run_inference(room_id: str, text: str, max_new_tokens: int,
@@ -168,15 +167,14 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
         yield {"error": "pipeline not ready — all 3 devices must be connected"}
         return
 
-    # Wrap in Q&A format — nudges GPT-2 toward a response rather than random continuation
-    wrapped = f"Q: {text}\nA:"
-    input_ids = tokenizer.encode(wrapped)
-    generated = list(input_ids)
+    wrapped    = f"Q: {text}\nA:"
+    input_ids  = tokenizer.encode(wrapped).ids
+    generated  = list(input_ids)
 
     all_browser = all(d.ws is not None for d in pipeline)
 
     if all_browser and server_head is None:
-        yield {"error": "server_head.pt missing — re-run: python -m splitter.split_model then restart server"}
+        yield {"error": "server_head.npz missing — restart server"}
         return
 
     async with httpx.AsyncClient(timeout=60.0) as http_client:
@@ -191,7 +189,7 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
                     return
 
                 for device in pipeline:
-                    rid = uuid.uuid4().hex
+                    rid  = uuid.uuid4().hex
                     loop = asyncio.get_event_loop()
                     fut  = loop.create_future()
                     _pending_forwards[rid] = fut
@@ -235,7 +233,7 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
                     try:
                         r = await http_client.post(f"{device.url}/forward", json=body)
                         r.raise_for_status()
-                    except Exception as exc:
+                    except Exception:
                         room.mark_dropped(device.device_id)
                         await _broadcast(room_id, {"type": "device_dropped",
                                                     "device_id": device.device_id,
@@ -248,14 +246,14 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
                     else:
                         hidden_payload = data["hidden"]
 
-                logits = payload_to_tensor(logits_payload)
+                logits = payload_to_tensor(logits_payload).numpy()
 
             next_token = _sample_next(logits[0, -1, :], temperature, top_p)
             generated.append(next_token)
             decoded = tokenizer.decode([next_token])
             yield {"token": decoded}
 
-            if next_token == tokenizer.eos_token_id or decoded == "\n":
+            if next_token == GPT2_EOS or decoded == "\n":
                 break
 
     yield {"done": True, "full": tokenizer.decode(generated)}
@@ -330,7 +328,6 @@ def room_status(room_id: str):
 
 @app.get("/slice/{slice_id}")
 def get_slice_pt(slice_id: int):
-    """Serves .pt slice files for Python workers."""
     path = Path(MODEL_SLICES_DIR) / f"slice_{slice_id}.pt"
     if not path.is_file():
         raise HTTPException(404, f"Slice {slice_id} not found — run: python -m splitter.split_model")
@@ -341,13 +338,9 @@ def get_slice_pt(slice_id: int):
 
 @app.get("/onnx/{slice_id}")
 def get_slice_onnx(slice_id: int):
-    """Serves .onnx slice files for browser workers."""
     path = Path(MODEL_SLICES_DIR) / f"slice_{slice_id}.onnx"
     if not path.is_file():
-        raise HTTPException(
-            404,
-            f"ONNX slice {slice_id} not found — re-run: python -m splitter.split_model"
-        )
+        raise HTTPException(404, f"ONNX slice {slice_id} not found")
     return FileResponse(
         str(path), media_type="application/octet-stream",
         headers={"Content-Disposition": f"attachment; filename=slice_{slice_id}.onnx"},
@@ -375,14 +368,12 @@ async def ws_room(websocket: WebSocket, room_id: str):
                 await websocket.send_text(json.dumps({"type": "pong"}))
 
             elif t == "worker_ready":
-                # Browser worker announces ONNX loaded and ready
-                device_id = msg.get("device_id", "")
-                ram_mb    = msg.get("ram_mb", 2048)
+                device_id    = msg.get("device_id", "")
+                ram_mb       = msg.get("ram_mb", 2048)
                 my_device_id = device_id
 
                 dev = room.get_device(device_id)
                 if dev is None:
-                    # Auto-assign if device hasn't called /join yet
                     dev = room.join(device_id, ram_mb)
 
                 if dev is not None:
@@ -394,7 +385,6 @@ async def ws_room(websocket: WebSocket, room_id: str):
                         await _broadcast(room_id, {"type": "pipeline_ready", **state})
 
             elif t == "forward_result":
-                # Browser returns result of a forward pass
                 rid = msg.get("request_id", "")
                 if rid in _pending_forwards:
                     fut = _pending_forwards[rid]
@@ -402,7 +392,6 @@ async def ws_room(websocket: WebSocket, room_id: str):
                         fut.set_result(msg)
 
             elif t == "forward_error":
-                # Browser reports an error during forward pass
                 rid = msg.get("request_id", "")
                 if rid in _pending_forwards:
                     fut = _pending_forwards[rid]
@@ -439,7 +428,7 @@ async def stream(room_id: str, prompt: str, max_new_tokens: int = 80,
     )
 
 
-# ─── Legacy endpoints (Python worker / Phase 1 compatibility) ─────────────────
+# ─── Legacy endpoints (Python worker compatibility) ───────────────────────────
 
 @app.post("/register")
 async def register(req: RegisterRequest):
@@ -477,7 +466,7 @@ async def infer(req: InferRequest):
     if pipeline is None:
         raise HTTPException(503, "Pipeline not ready — check /status")
 
-    input_ids = tokenizer.encode(req.text)
+    input_ids = tokenizer.encode(req.text).ids
     generated = list(input_ids)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -498,10 +487,10 @@ async def infer(req: InferRequest):
                 else:
                     hidden_payload = data["hidden"]
 
-            logits     = payload_to_tensor(logits_payload)
-            next_token = int(logits[0, -1, :].argmax())
+            logits     = payload_to_tensor(logits_payload).numpy()
+            next_token = int(np.argmax(logits[0, -1, :]))
             generated.append(next_token)
-            if next_token == tokenizer.eos_token_id:
+            if next_token == GPT2_EOS:
                 break
 
     return {"input": req.text, "output": tokenizer.decode(generated)}
