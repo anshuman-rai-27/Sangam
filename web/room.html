@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sangam Room</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- onnxruntime-web: runs ONNX model slices in browser via WASM/WebGPU -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+</head>
+<body>
+
+<!-- Header -->
+<div class="room-header">
+  <a href="/" class="logo">SANGAM</a>
+  <div class="room-id-chip" id="room-id-chip">…</div>
+  <button class="btn-secondary" style="padding:4px 10px;font-size:12px;" onclick="copyLink()">Copy link</button>
+  <div class="spacer"></div>
+  <div id="ws-status" class="status-line">connecting…</div>
+</div>
+
+<!-- Main layout -->
+<div class="container">
+  <div class="room-layout">
+
+    <!-- Left: device panel -->
+    <div>
+
+      <!-- Connected devices -->
+      <div class="card" style="margin-bottom:12px;">
+        <h2 style="margin-bottom:12px;">Devices</h2>
+        <div class="pipeline-bar"><div class="pipeline-fill" id="pipeline-fill" style="width:0%"></div></div>
+        <div id="pipeline-label" class="status-line" style="margin-bottom:16px;">0 / 3 ready</div>
+        <div id="device-list"></div>
+      </div>
+
+      <!-- Contribute this device (browser worker) -->
+      <div class="card" style="margin-bottom:12px;" id="worker-panel">
+        <h2 style="margin-bottom:8px;">Contribute this device</h2>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px;">
+          Turn this browser into a compute node. Downloads ~112 MB, no install required.
+        </p>
+
+        <!-- Download progress (hidden until active) -->
+        <div id="dl-progress-wrap" style="display:none;margin-bottom:10px;">
+          <div class="pipeline-bar"><div class="pipeline-fill" id="dl-bar" style="width:0%"></div></div>
+          <div id="dl-label" class="status-line" style="font-size:11px;"></div>
+        </div>
+
+        <button class="btn-primary" id="join-worker-btn" onclick="joinAsWorker()" style="width:100%;">
+          Join as worker
+        </button>
+        <div id="worker-status" class="status-line" style="margin-top:6px;min-height:16px;font-size:12px;"></div>
+      </div>
+
+      <!-- Python fallback -->
+      <div class="card">
+        <h2 style="margin-bottom:8px;">Python worker (optional)</h2>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:8px;">
+          Or contribute from a device with Python installed:
+        </p>
+        <div class="join-cmd" id="join-cmd">loading…</div>
+        <div style="margin-top:8px;display:flex;gap:8px;">
+          <button class="btn-secondary" style="font-size:11px;padding:5px 10px;" onclick="copyJoinCmd()">Copy</button>
+        </div>
+      </div>
+
+    </div><!-- /left -->
+
+    <!-- Right: inference panel -->
+    <div class="inference-panel">
+      <h2>Inference</h2>
+
+      <div class="prompt-row">
+        <textarea id="prompt-input" rows="2" placeholder="Type a prompt…" onkeydown="handleKey(event)"></textarea>
+        <button class="btn-primary" id="send-btn" onclick="sendPrompt()" disabled>Send</button>
+      </div>
+
+      <div class="status-line" id="infer-status">Waiting for pipeline to be ready…</div>
+
+      <div class="output-box" id="output-box">
+        <span style="color:var(--muted);font-size:12px;">Response will stream here token by token.</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/room.js"></script>
+</body>
+</html>

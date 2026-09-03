@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sangam — Distributed Inference</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="hero">
+    <div>
+      <div class="hero-title">SAN<span>GAM</span></div>
+      <p class="hero-sub">Split a language model across devices. Run inference together.</p>
+    </div>
+
+    <div class="action-card">
+      <button class="btn-primary" id="btn-create" onclick="createRoom()">
+        Create new room
+      </button>
+
+      <div class="divider">or</div>
+
+      <div class="input-row">
+        <input type="text" id="room-input" placeholder="Room code (e.g. a3f9c2b1)"
+               onkeydown="if(event.key==='Enter') joinRoom()">
+        <button class="btn-secondary" onclick="joinRoom()">Join</button>
+      </div>
+      <div id="err" style="color:var(--red);font-size:12px;min-height:16px;"></div>
+    </div>
+  </div>
+
+  <script>
+    async function createRoom() {
+      const btn = document.getElementById('btn-create');
+      btn.disabled = true;
+      btn.textContent = 'Creating…';
+      try {
+        const resp = await fetch('/room/create', { method: 'POST' });
+        const { room_id } = await resp.json();
+        window.location.href = `/room/${room_id}`;
+      } catch (e) {
+        document.getElementById('err').textContent = 'Server error — is it running?';
+        btn.disabled = false;
+        btn.textContent = 'Create new room';
+      }
+    }
+
+    function joinRoom() {
+      const id = document.getElementById('room-input').value.trim();
+      if (!id) { document.getElementById('err').textContent = 'Enter a room code.'; return; }
+      window.location.href = `/room/${id}`;
+    }
+  </script>
+</body>
+</html>

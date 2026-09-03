@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: sangam
+    runtime: python
+    plan: starter        # persistent disk requires starter or above
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m server.main
+    healthCheckPath: /status
+    envVars:
+      - key: MODEL_SLICES_DIR
+        value: /mnt/model_slices
+      - key: TOKENIZER_PATH
+        value: /mnt/model_slices/tokenizer
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      - key: PYTHONIOENCODING
+        value: utf-8
+      - key: PORT
+        value: 8000
+    disk:
+      name: model-slices
+      mountPath: /mnt/model_slices
+      sizeGB: 2

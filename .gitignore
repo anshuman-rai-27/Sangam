@@ -1,0 +1,9 @@
+model_slices/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pt
+*.pth
+.venv/
+venv/

@@ -1,0 +1,10 @@
+services:
+  server:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model_slices:/app/model_slices
+    env_file:
+      - .env
+    restart: unless-stopped
