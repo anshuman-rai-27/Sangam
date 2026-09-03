@@ -27,6 +27,13 @@ function connectWS() {
 
   ws.onopen = () => {
     setWsStatus('connected', false);
+    // Re-announce after reconnect so server restores the ready slot
+    if (isWorker && mySliceId !== null) {
+      ws.send(JSON.stringify({
+        type: 'worker_ready', device_id: myDeviceId,
+        slice_id: mySliceId, ram_mb: estimateRAM(),
+      }));
+    }
     // Keepalive — Render free tier drops idle WS after ~55s
     const ping = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'ping'}));
