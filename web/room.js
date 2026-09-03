@@ -25,7 +25,14 @@ function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws/room/${roomId}`);
 
-  ws.onopen = () => setWsStatus('connected', false);
+  ws.onopen = () => {
+    setWsStatus('connected', false);
+    // Keepalive — Render free tier drops idle WS after ~55s
+    const ping = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'ping'}));
+      else clearInterval(ping);
+    }, 25000);
+  };
 
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
