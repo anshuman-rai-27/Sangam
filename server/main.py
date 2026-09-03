@@ -99,13 +99,6 @@ class _ServerHead:
 async def lifespan(app: FastAPI):
     global tokenizer, server_head
 
-    # Auto-generate model slices on first start (e.g. Render persistent disk is empty)
-    head_path = os.path.join(MODEL_SLICES_DIR, "server_head.pt")
-    if not os.path.isfile(head_path):
-        print("[server] model slices not found — running splitter (first run, ~5 min)…")
-        from splitter.split_model import split
-        split(MODEL_SLICES_DIR)
-
     tok_path = TOKENIZER_PATH if os.path.isdir(TOKENIZER_PATH) else "gpt2"
     tokenizer = GPT2Tokenizer.from_pretrained(tok_path)
     print(f"[server] tokenizer loaded from '{tok_path}'")

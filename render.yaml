@@ -4,8 +4,7 @@ services:
     runtime: python
     plan: starter        # persistent disk requires starter or above
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m server.main
-    healthCheckPath: /status
+    startCommand: python -m splitter.split_model --output /mnt/model_slices && python -m server.main
     envVars:
       - key: MODEL_SLICES_DIR
         value: /mnt/model_slices
