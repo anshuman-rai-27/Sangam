@@ -38,6 +38,7 @@ from shared.serialization import payload_to_tensor
 
 MODEL_SLICES_DIR = os.environ.get("MODEL_SLICES_DIR", "model_slices").strip()
 TOKENIZER_PATH   = os.environ.get("TOKENIZER_PATH",   "model_slices/tokenizer").strip()
+HF_REPO          = os.environ.get("HF_REPO", "anshumanrai/sangam-gpt2-slices")
 WEB_DIR          = Path(__file__).parent.parent / "web"
 
 registry     = DeviceRegistry()
@@ -104,11 +105,15 @@ async def lifespan(app: FastAPI):
     print(f"[server] tokenizer loaded from '{tok_path}'")
 
     head_path = os.path.join(MODEL_SLICES_DIR, "server_head.pt")
-    if os.path.isfile(head_path):
-        server_head = _ServerHead(head_path)
-        print(f"[server] server_head loaded (browser workers enabled)")
-    else:
-        print("[server] server_head.pt not found — browser workers disabled until you re-run splitter")
+    if not os.path.isfile(head_path):
+        hf_url = f"https://huggingface.co/{HF_REPO}/resolve/main/server_head.pt"
+        print(f"[server] downloading server_head.pt from {hf_url} …")
+        os.makedirs(MODEL_SLICES_DIR, exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(hf_url, head_path)
+        print("[server] server_head.pt downloaded")
+    server_head = _ServerHead(head_path)
+    print("[server] server_head loaded (browser workers enabled)")
 
     print("[server] ready at http://0.0.0.0:" + os.environ.get("PORT", "8000"))
     yield

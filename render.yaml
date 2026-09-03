@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m splitter.split_model && python -m server.main
+    startCommand: python -m server.main
     envVars:
       - key: PYTHONPATH
         value: /opt/render/project/src
@@ -12,3 +12,5 @@ services:
         value: utf-8
       - key: PORT
         value: 8000
+      - key: HF_REPO
+        value: anshumanrai/sangam-gpt2-slices

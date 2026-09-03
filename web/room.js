@@ -152,7 +152,8 @@ async function joinAsWorker() {
   // 2. Download ONNX with progress
   let onnxBuffer;
   try {
-    onnxBuffer = await downloadWithProgress(`/onnx/${mySliceId}`, (pct) => {
+    const onnxUrl = `https://huggingface.co/anshumanrai/sangam-gpt2-slices/resolve/main/slice_${mySliceId}.onnx`;
+  onnxBuffer = await downloadWithProgress(onnxUrl, (pct) => {
       document.getElementById('dl-bar').style.width = pct + '%';
       document.getElementById('dl-label').textContent = `downloading slice ${mySliceId}: ${pct}%`;
     });
