@@ -16,7 +16,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 if ROOT not in sys.path:
@@ -34,65 +34,71 @@ from server.registry import DeviceRegistry
 from server.room import RoomManager
 from shared.serialization import payload_to_tensor
 
-MODEL_SLICES_DIR = os.environ.get("MODEL_SLICES_DIR", "model_slices").strip()
-WEB_DIR          = Path(__file__).parent.parent / "web"
+WEB_DIR = Path(__file__).parent.parent / "web"
 
 # ── Model registry ────────────────────────────────────────────────────────────
-# Add entries here for additional models. Each model needs its own HF repo with
-# slice_0.onnx, slice_1.onnx, slice_2.onnx, server_head.npz uploaded.
-_hf  = os.environ.get("HF_REPO",       "anshumanrai/sangam-qwen-slices")
-_cdn = os.environ.get("ONNX_CDN_BASE", f"https://huggingface.co/{_hf}/resolve/main")
+_qwen_hf  = os.environ.get("HF_REPO",       "anshumanrai/sangam-qwen-slices")
+_qwen_cdn = os.environ.get("ONNX_CDN_BASE",  f"https://huggingface.co/{_qwen_hf}/resolve/main")
+_gpt2_hf  = os.environ.get("GPT2_HF_REPO",  "anshumanrai/sangam-gpt2-slices")
+_gpt2_cdn = os.environ.get("GPT2_CDN_BASE",  f"https://huggingface.co/{_gpt2_hf}/resolve/main")
 
 MODELS: Dict[str, dict] = {
     "qwen2.5-0.5b": {
-        "name":         "Qwen2.5-0.5B-Instruct",
-        "description":  "0.5B parameter instruction-following / reasoning model",
-        "hf_repo":      _hf,
-        "onnx_cdn_base": _cdn,
+        "name":             "Qwen2.5-0.5B-Instruct",
+        "description":      "0.5B parameter instruction-following model",
+        "hf_repo":          _qwen_hf,
+        "onnx_cdn_base":    _qwen_cdn,
+        "local_dir":        os.environ.get("MODEL_SLICES_DIR", "model_slices"),
+        "tokenizer_id":     "Qwen/Qwen2.5-0.5B-Instruct",
+        "eos_tokens":       (151645, 151643),
+        "architecture":     "qwen2",
+        "slice_assignments": [(0, 8), (8, 16), (16, 24)],
+    },
+    "gpt2": {
+        "name":             "GPT-2 (117M)",
+        "description":      "OpenAI GPT-2 base language model",
+        "hf_repo":          _gpt2_hf,
+        "onnx_cdn_base":    _gpt2_cdn,
+        "local_dir":        "model_slices/gpt2",
+        "tokenizer_id":     "gpt2",
+        "eos_tokens":       (50256,),
+        "architecture":     "gpt2",
+        "slice_assignments": [(0, 4), (4, 8), (8, 12)],
     },
 }
-DEFAULT_MODEL = next(iter(MODELS))
-
-QWEN_EOS  = 151645   # <|im_end|> token id in Qwen2.5 vocab
-QWEN_EOS2 = 151643   # <|endoftext|>
+DEFAULT_MODEL = "qwen2.5-0.5b"
 
 registry     = DeviceRegistry()
 room_manager = RoomManager()
-tokenizer: Optional[Tokenizer] = None
-server_head  = None
 
-_room_ws:          Dict[str, Set[WebSocket]]   = {}
-_room_locks:       Dict[str, asyncio.Lock]     = {}
-_pending_forwards: Dict[str, asyncio.Future]   = {}
+# Per-model resources loaded at startup
+_tokenizers:   Dict[str, Any]  = {}
+_server_heads: Dict[str, Any]  = {}
+
+_room_ws:          Dict[str, Set[WebSocket]] = {}
+_room_locks:       Dict[str, asyncio.Lock]   = {}
+_pending_forwards: Dict[str, asyncio.Future] = {}
 
 
-# ─── Float32 helpers (browser ↔ server) ─────────────────────────────────────
+# ─── Float32 helpers (browser ↔ server) ──────────────────────────────────────
 
 def _t2b(arr: np.ndarray) -> Tuple[str, list]:
-    """ndarray → (base64-float32, shape-list)."""
     arr = np.ascontiguousarray(arr, dtype=np.float32)
     return _b64.b64encode(arr.tobytes()).decode(), list(arr.shape)
 
-
 def _b2t(data: str, shape: list) -> np.ndarray:
-    """base64-float32 + shape → ndarray."""
     raw = _b64.b64decode(data)
     return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
 
 
-# ─── Server head (embedding + LM-head projection) ────────────────────────────
+# ─── Server heads (embedding + LM-head projection) ───────────────────────────
 
-class _ServerHead:
-    """
-    Qwen2.5-0.5B-Instruct: RoPE attention (no wpe), weight-tied lm_head = wte.T.
-    wte stored as float16 (~272 MB) to fit Render 512 MB limit.
-    Project only the last token to avoid materialising the full vocab matrix.
-    """
-
+class _QwenHead:
+    """Qwen2.5: RoPE (no wpe), weight-tied lm_head = wte.T, hidden=896."""
     def __init__(self, path: str):
         data = np.load(path)
         self._wte = data["wte"]  # float16, (151936, 896)
-        print(f"[server] server_head: wte={self._wte.shape} {self._wte.dtype}")
+        print(f"[server] qwen head: wte={self._wte.shape} {self._wte.dtype}")
 
     def embed(self, input_ids: list) -> Tuple[str, list]:
         ids    = np.array(input_ids, dtype=np.int32)
@@ -100,10 +106,34 @@ class _ServerHead:
         return _t2b(hidden[np.newaxis])              # (1, n, 896)
 
     def project(self, data: str, shape: list) -> np.ndarray:
-        hidden = _b2t(data, shape)                          # (1, n, 896) float32
-        last   = hidden[0, -1, :].astype(np.float16)        # (896,) fp16
-        logits = (last @ self._wte.T).astype(np.float32)   # (151936,) fp32
-        return logits.reshape(1, 1, -1)                     # (1, 1, 151936)
+        hidden = _b2t(data, shape)
+        last   = hidden[0, -1, :].astype(np.float16)
+        logits = (last @ self._wte.T).astype(np.float32)
+        return logits.reshape(1, 1, -1)
+
+
+class _GPT2Head:
+    """GPT-2: learned absolute positional embeddings (wpe), hidden=768."""
+    def __init__(self, path: str):
+        data = np.load(path)
+        self._wte = data["wte"]  # float16, (50257, 768)
+        self._wpe = data["wpe"]  # float16, (1024, 768)
+        print(f"[server] gpt2 head: wte={self._wte.shape} wpe={self._wpe.shape}")
+
+    def embed(self, input_ids: list) -> Tuple[str, list]:
+        ids    = np.array(input_ids, dtype=np.int32)
+        pos    = np.arange(len(ids), dtype=np.int32)
+        hidden = (self._wte[ids] + self._wpe[pos]).astype(np.float32)  # (n, 768)
+        return _t2b(hidden[np.newaxis])                                  # (1, n, 768)
+
+    def project(self, data: str, shape: list) -> np.ndarray:
+        hidden = _b2t(data, shape)
+        last   = hidden[0, -1, :].astype(np.float16)
+        logits = (last @ self._wte.T).astype(np.float32)
+        return logits.reshape(1, 1, -1)
+
+
+_HEAD_CLASSES = {"qwen2": _QwenHead, "gpt2": _GPT2Head}
 
 
 # ─── Sampling ─────────────────────────────────────────────────────────────────
@@ -130,24 +160,35 @@ def _sample_next(logits_row: np.ndarray, temperature: float, top_p: float) -> in
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global tokenizer, server_head
+    import urllib.request
 
-    # Qwen2.5 tokenizer via tokenizers library (no torch needed)
-    tokenizer = Tokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    print("[server] tokenizer loaded (Qwen2.5-0.5B-Instruct)")
+    for model_key, cfg in MODELS.items():
+        # Tokenizer
+        try:
+            tok = Tokenizer.from_pretrained(cfg["tokenizer_id"])
+            _tokenizers[model_key] = tok
+            print(f"[server] tokenizer loaded: {cfg['tokenizer_id']}")
+        except Exception as e:
+            print(f"[server] WARNING: tokenizer failed for {model_key}: {e}")
 
-    # Server head weights
-    head_path = os.path.join(MODEL_SLICES_DIR, "server_head.npz")
-    if not os.path.isfile(head_path):
-        _default_hf = MODELS[DEFAULT_MODEL]["hf_repo"]
-        hf_url = f"https://huggingface.co/{_default_hf}/resolve/main/server_head.npz"
-        print(f"[server] downloading server_head.npz from {hf_url} …")
-        os.makedirs(MODEL_SLICES_DIR, exist_ok=True)
-        import urllib.request
-        urllib.request.urlretrieve(hf_url, head_path)
-        print("[server] server_head.npz downloaded")
-    server_head = _ServerHead(head_path)
-    print("[server] server_head loaded (browser workers enabled)")
+        # Server head
+        local_dir = cfg["local_dir"]
+        head_path = os.path.join(local_dir, "server_head.npz")
+        if not os.path.isfile(head_path):
+            hf_url = f"https://huggingface.co/{cfg['hf_repo']}/resolve/main/server_head.npz"
+            print(f"[server] downloading server_head.npz for {model_key} from {hf_url} …")
+            os.makedirs(local_dir, exist_ok=True)
+            try:
+                urllib.request.urlretrieve(hf_url, head_path)
+                print(f"[server] downloaded server_head.npz for {model_key}")
+            except Exception as e:
+                print(f"[server] WARNING: could not download server_head for {model_key}: {e}")
+                continue
+
+        arch = cfg["architecture"]
+        HeadClass = _HEAD_CLASSES.get(arch)
+        if HeadClass:
+            _server_heads[model_key] = HeadClass(head_path)
 
     print("[server] ready at http://0.0.0.0:" + os.environ.get("PORT", "8000"))
     yield
@@ -186,23 +227,37 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
         yield {"error": "pipeline not ready — all 3 devices must be connected"}
         return
 
-    wrapped   = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
-    input_ids = tokenizer.encode(wrapped).ids
-    generated  = list(input_ids)
+    model_key = room.model
+    cfg       = MODELS.get(model_key, MODELS[DEFAULT_MODEL])
+    tok       = _tokenizers.get(model_key)
+    head      = _server_heads.get(model_key)
+    eos       = cfg["eos_tokens"]
+
+    if tok is None:
+        yield {"error": f"tokenizer not loaded for model '{model_key}'"}
+        return
+
+    # Apply prompt template
+    if cfg["architecture"] == "qwen2":
+        wrapped = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    else:
+        wrapped = text  # GPT-2 base: no chat template
+
+    input_ids = tok.encode(wrapped).ids
+    generated = list(input_ids)
 
     all_browser = all(d.ws is not None for d in pipeline)
 
-    if all_browser and server_head is None:
-        yield {"error": "server_head.npz missing — restart server"}
+    if all_browser and head is None:
+        yield {"error": f"server_head not loaded for model '{model_key}' — restart server"}
         return
 
     async with httpx.AsyncClient(timeout=60.0) as http_client:
         for _ in range(max_new_tokens):
 
             if all_browser:
-                # ── Browser workers: server embeds → WS routing → server projects ──
                 try:
-                    b64, shape = server_head.embed(generated)
+                    b64, shape = head.embed(generated)
                 except Exception as exc:
                     yield {"error": f"embed failed: {exc}"}
                     return
@@ -230,17 +285,14 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
                         yield {"error": f"device '{device.device_id}' timed out"}
                         return
                     except Exception as exc:
-                        # Device sent an explicit forward_error — it's still connected,
-                        # so don't drop it. Just surface the error to the user.
                         yield {"error": str(exc)}
                         return
                     finally:
                         _pending_forwards.pop(rid, None)
 
-                logits = server_head.project(b64, shape)
+                logits = head.project(b64, shape)
 
             else:
-                # ── Python workers: existing HTTP /forward routing ───────────────
                 hidden_payload = None
                 logits_payload = None
 
@@ -267,13 +319,13 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
 
             next_token = _sample_next(logits[0, -1, :], temperature, top_p)
             generated.append(next_token)
-            decoded = tokenizer.decode([next_token])
+            decoded = tok.decode([next_token])
             yield {"token": decoded}
 
-            if next_token in (QWEN_EOS, QWEN_EOS2):
+            if next_token in eos:
                 break
 
-    yield {"done": True, "full": tokenizer.decode(generated)}
+    yield {"done": True, "full": tok.decode(generated)}
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -296,7 +348,7 @@ class JoinRequest(BaseModel):
     ram_mb:    int = 2048
 
 class CreateRoomRequest(BaseModel):
-    model: Optional[str] = None   # model key from MODELS registry; defaults to DEFAULT_MODEL
+    model: Optional[str] = None
 
 
 # ─── Static pages ─────────────────────────────────────────────────────────────
@@ -330,9 +382,13 @@ def room_create(req: CreateRoomRequest = CreateRoomRequest()):
     model_key = req.model or DEFAULT_MODEL
     if model_key not in MODELS:
         raise HTTPException(400, f"Unknown model '{model_key}'. Available: {list(MODELS)}")
-    m    = MODELS[model_key]
-    room = room_manager.create(model=model_key, model_name=m["name"])
-    return {"room_id": room.room_id, "model": model_key, "model_name": m["name"]}
+    cfg  = MODELS[model_key]
+    room = room_manager.create(
+        model=model_key,
+        model_name=cfg["name"],
+        slice_assignments=cfg["slice_assignments"],
+    )
+    return {"room_id": room.room_id, "model": model_key, "model_name": cfg["name"]}
 
 @app.post("/room/{room_id}/join")
 def room_join(room_id: str, req: JoinRequest):
@@ -340,18 +396,20 @@ def room_join(room_id: str, req: JoinRequest):
     dev  = room.join(req.device_id, req.ram_mb)
     if dev is None:
         raise HTTPException(409, "Room full — all 3 slice slots are taken")
-    local_path = Path(MODEL_SLICES_DIR) / f"slice_{dev.slice_id}.onnx"
+
+    cfg        = MODELS.get(room.model, MODELS[DEFAULT_MODEL])
+    local_dir  = cfg["local_dir"]
+    local_path = Path(local_dir) / f"slice_{dev.slice_id}.onnx"
     if local_path.is_file():
-        # Serve directly from this server (local dev / self-hosted)
-        onnx_url = f"/onnx/{dev.slice_id}"
+        onnx_url = f"/onnx/{room.model}/{dev.slice_id}"
     else:
-        cdn = MODELS.get(room.model, MODELS[DEFAULT_MODEL])["onnx_cdn_base"]
-        onnx_url = f"{cdn}/slice_{dev.slice_id}.onnx"
+        onnx_url = f"{cfg['onnx_cdn_base']}/slice_{dev.slice_id}.onnx"
+
     return {
-        "device_id":    dev.device_id,
-        "slice_id":     dev.slice_id,
-        "layers":       [dev.layer_start, dev.layer_end],
-        "onnx_url":     onnx_url,
+        "device_id": dev.device_id,
+        "slice_id":  dev.slice_id,
+        "layers":    [dev.layer_start, dev.layer_end],
+        "onnx_url":  onnx_url,
     }
 
 @app.get("/room/{room_id}/status")
@@ -364,19 +422,24 @@ def room_status(room_id: str):
 
 # ─── Slice serving ────────────────────────────────────────────────────────────
 
-@app.get("/slice/{slice_id}")
-def get_slice_pt(slice_id: int):
-    path = Path(MODEL_SLICES_DIR) / f"slice_{slice_id}.pt"
+@app.get("/onnx/{model_key}/{slice_id}")
+def get_slice_onnx(model_key: str, slice_id: int):
+    if model_key not in MODELS:
+        raise HTTPException(404, f"Unknown model '{model_key}'")
+    local_dir = MODELS[model_key]["local_dir"]
+    path = Path(local_dir) / f"slice_{slice_id}.onnx"
     if not path.is_file():
-        raise HTTPException(404, f"Slice {slice_id} not found — run: python -m splitter.split_model")
+        raise HTTPException(404, f"ONNX slice {slice_id} not found for {model_key}")
     return FileResponse(
         str(path), media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename=slice_{slice_id}.pt"},
+        headers={"Content-Disposition": f"attachment; filename=slice_{slice_id}.onnx"},
     )
 
+# Legacy single-model endpoint (backward compat)
 @app.get("/onnx/{slice_id}")
-def get_slice_onnx(slice_id: int):
-    path = Path(MODEL_SLICES_DIR) / f"slice_{slice_id}.onnx"
+def get_slice_onnx_legacy(slice_id: int):
+    local_dir = MODELS[DEFAULT_MODEL]["local_dir"]
+    path = Path(local_dir) / f"slice_{slice_id}.onnx"
     if not path.is_file():
         raise HTTPException(404, f"ONNX slice {slice_id} not found")
     return FileResponse(
@@ -504,7 +567,8 @@ async def infer(req: InferRequest):
     if pipeline is None:
         raise HTTPException(503, "Pipeline not ready — check /status")
 
-    input_ids = tokenizer.encode(req.text).ids
+    tok = _tokenizers.get(DEFAULT_MODEL)
+    input_ids = tok.encode(req.text).ids
     generated = list(input_ids)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -528,10 +592,10 @@ async def infer(req: InferRequest):
             logits     = payload_to_tensor(logits_payload).numpy()
             next_token = int(np.argmax(logits[0, -1, :]))
             generated.append(next_token)
-            if next_token in (QWEN_EOS, QWEN_EOS2):
+            if next_token in MODELS[DEFAULT_MODEL]["eos_tokens"]:
                 break
 
-    return {"input": req.text, "output": tokenizer.decode(generated)}
+    return {"input": req.text, "output": tok.decode(generated)}
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

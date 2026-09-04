@@ -1,6 +1,12 @@
 """
-Upload Qwen2.5-0.5B-Instruct model slices to HuggingFace Hub.
-Run once: python scripts/upload_to_hf.py --repo YOUR_HF_USERNAME/sangam-qwen-slices
+Upload model slices to HuggingFace Hub.
+
+Usage:
+    # Qwen2.5
+    python scripts/upload_to_hf.py --repo your-username/sangam-qwen-slices
+
+    # GPT-2
+    python scripts/upload_to_hf.py --repo your-username/sangam-gpt2-slices --dir model_slices/gpt2
 """
 import argparse
 import os
@@ -16,7 +22,6 @@ if _env.is_file():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-SLICES_DIR = "model_slices"
 FILES = [
     "slice_0.onnx",
     "slice_1.onnx",
@@ -24,14 +29,15 @@ FILES = [
     "server_head.npz",
 ]
 
-def upload(repo_id: str):
+def upload(repo_id: str, slices_dir: str):
     token = os.environ.get("HF_TOKEN")
     api = HfApi(token=token)
     create_repo(repo_id, repo_type="model", exist_ok=True, token=token)
     print(f"Repo: https://huggingface.co/{repo_id}")
+    print(f"Dir:  {slices_dir}")
 
     for fname in FILES:
-        path = os.path.join(SLICES_DIR, fname)
+        path = os.path.join(slices_dir, fname)
         if not os.path.isfile(path):
             print(f"  SKIP {fname} (not found)")
             continue
@@ -52,5 +58,6 @@ def upload(repo_id: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, help="e.g. your-username/sangam-gpt2-slices")
+    parser.add_argument("--dir", default="model_slices", help="local directory containing slice files")
     args = parser.parse_args()
-    upload(args.repo)
+    upload(args.repo, args.dir)

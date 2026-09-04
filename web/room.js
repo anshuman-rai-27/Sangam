@@ -69,13 +69,10 @@ function setWsStatus(text, isErr) {
 
 // ── Room state rendering ──────────────────────────────────────────────────────
 
-const SLICE_LABELS = [
-  'layers 0–7 (first)',
-  'layers 8–15 (middle)',
-  'layers 16–23 + norm (last)',
-];
+let SLICE_LABELS = [];
 
 function updateRoom(data) {
+  if (data.slice_labels) SLICE_LABELS = data.slice_labels;
   const ready = data.ready_count  ?? 0;
   const total = data.total_slots  ?? 3;
 
