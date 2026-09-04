@@ -230,10 +230,8 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
                         yield {"error": f"device '{device.device_id}' timed out"}
                         return
                     except Exception as exc:
-                        room.mark_dropped(device.device_id)
-                        await _broadcast(room_id, {"type": "device_dropped",
-                                                    "device_id": device.device_id,
-                                                    **room.to_dict()})
+                        # Device sent an explicit forward_error — it's still connected,
+                        # so don't drop it. Just surface the error to the user.
                         yield {"error": str(exc)}
                         return
                     finally:

@@ -4,7 +4,17 @@ Run once: python scripts/upload_to_hf.py --repo YOUR_HF_USERNAME/sangam-qwen-sli
 """
 import argparse
 import os
+from pathlib import Path
 from huggingface_hub import HfApi, create_repo
+
+# Load .env from repo root if present
+_env = Path(__file__).parent.parent / ".env"
+if _env.is_file():
+    for line in _env.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
 SLICES_DIR = "model_slices"
 FILES = [
@@ -15,8 +25,9 @@ FILES = [
 ]
 
 def upload(repo_id: str):
-    api = HfApi()
-    create_repo(repo_id, repo_type="model", exist_ok=True)
+    token = os.environ.get("HF_TOKEN")
+    api = HfApi(token=token)
+    create_repo(repo_id, repo_type="model", exist_ok=True, token=token)
     print(f"Repo: https://huggingface.co/{repo_id}")
 
     for fname in FILES:
@@ -31,6 +42,7 @@ def upload(repo_id: str):
             path_in_repo=fname,
             repo_id=repo_id,
             repo_type="model",
+            token=token,
         )
         print(f"  done: {fname}")
 
