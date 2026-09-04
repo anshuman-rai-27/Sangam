@@ -1,6 +1,6 @@
 """
-Upload model slices to HuggingFace Hub.
-Run once: python scripts/upload_to_hf.py --repo YOUR_HF_USERNAME/sangam-gpt2-slices
+Upload Qwen2.5-0.5B-Instruct model slices to HuggingFace Hub.
+Run once: python scripts/upload_to_hf.py --repo YOUR_HF_USERNAME/sangam-qwen-slices
 """
 import argparse
 import os
@@ -11,7 +11,7 @@ FILES = [
     "slice_0.onnx",
     "slice_1.onnx",
     "slice_2.onnx",
-    "server_head.pt",
+    "server_head.npz",
 ]
 
 def upload(repo_id: str):

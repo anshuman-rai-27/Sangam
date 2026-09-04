@@ -35,10 +35,16 @@ from server.room import RoomManager
 from shared.serialization import payload_to_tensor
 
 MODEL_SLICES_DIR = os.environ.get("MODEL_SLICES_DIR", "model_slices").strip()
-HF_REPO          = os.environ.get("HF_REPO", "anshumanrai/sangam-gpt2-slices")
+HF_REPO          = os.environ.get("HF_REPO", "anshumanrai/sangam-qwen-slices")
+# Full CDN base for browser ONNX downloads; override to serve from a different host
+ONNX_CDN_BASE    = os.environ.get(
+    "ONNX_CDN_BASE",
+    f"https://huggingface.co/{HF_REPO}/resolve/main",
+)
 WEB_DIR          = Path(__file__).parent.parent / "web"
 
-GPT2_EOS = 50256
+QWEN_EOS  = 151645   # <|im_end|> token id in Qwen2.5 vocab
+QWEN_EOS2 = 151643   # <|endoftext|>
 
 registry     = DeviceRegistry()
 room_manager = RoomManager()
@@ -67,25 +73,27 @@ def _b2t(data: str, shape: list) -> np.ndarray:
 # ─── Server head (embedding + LM-head projection) ────────────────────────────
 
 class _ServerHead:
-    """Holds wte, wpe — server does embedding lookup and LM-head projection (wte.T)."""
+    """
+    Qwen2.5-0.5B-Instruct: RoPE attention (no wpe), weight-tied lm_head = wte.T.
+    wte stored as float16 (~272 MB) to fit Render 512 MB limit.
+    Project only the last token to avoid materialising the full vocab matrix.
+    """
 
     def __init__(self, path: str):
         data = np.load(path)
-        self._wte = data["wte"].astype(np.float32)  # (50257, 768)
-        self._wpe = data["wpe"].astype(np.float32)  # (1024,  768)
-        print(f"[server] server_head: wte={self._wte.shape}, wpe={self._wpe.shape}")
+        self._wte = data["wte"]  # float16, (151936, 896)
+        print(f"[server] server_head: wte={self._wte.shape} {self._wte.dtype}")
 
     def embed(self, input_ids: list) -> Tuple[str, list]:
-        ids = np.array(input_ids, dtype=np.int32)
-        n   = len(ids)
-        pos = np.arange(n, dtype=np.int32)
-        hidden = self._wte[ids] + self._wpe[pos]  # (n, 768)
-        hidden = hidden[np.newaxis]               # (1, n, 768)
-        return _t2b(hidden)
+        ids    = np.array(input_ids, dtype=np.int32)
+        hidden = self._wte[ids].astype(np.float32)  # (n, 896)
+        return _t2b(hidden[np.newaxis])              # (1, n, 896)
 
     def project(self, data: str, shape: list) -> np.ndarray:
-        hidden = _b2t(data, shape)      # (1, n, 768)
-        return hidden @ self._wte.T     # (1, n, 50257)
+        hidden = _b2t(data, shape)                          # (1, n, 896) float32
+        last   = hidden[0, -1, :].astype(np.float16)        # (896,) fp16
+        logits = (last @ self._wte.T).astype(np.float32)   # (151936,) fp32
+        return logits.reshape(1, 1, -1)                     # (1, 1, 151936)
 
 
 # ─── Sampling ─────────────────────────────────────────────────────────────────
@@ -114,9 +122,9 @@ def _sample_next(logits_row: np.ndarray, temperature: float, top_p: float) -> in
 async def lifespan(app: FastAPI):
     global tokenizer, server_head
 
-    # Tokenizer (GPT-2 BPE via tokenizers library — no torch needed)
-    tokenizer = Tokenizer.from_pretrained("gpt2")
-    print("[server] tokenizer loaded (gpt2)")
+    # Qwen2.5 tokenizer via tokenizers library (no torch needed)
+    tokenizer = Tokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    print("[server] tokenizer loaded (Qwen2.5-0.5B-Instruct)")
 
     # Server head weights
     head_path = os.path.join(MODEL_SLICES_DIR, "server_head.npz")
@@ -167,8 +175,8 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
         yield {"error": "pipeline not ready — all 3 devices must be connected"}
         return
 
-    wrapped    = f"Q: {text}\nA:"
-    input_ids  = tokenizer.encode(wrapped).ids
+    wrapped   = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    input_ids = tokenizer.encode(wrapped).ids
     generated  = list(input_ids)
 
     all_browser = all(d.ws is not None for d in pipeline)
@@ -253,7 +261,7 @@ async def _run_inference(room_id: str, text: str, max_new_tokens: int,
             decoded = tokenizer.decode([next_token])
             yield {"token": decoded}
 
-            if next_token == GPT2_EOS or decoded == "\n":
+            if next_token in (QWEN_EOS, QWEN_EOS2):
                 break
 
     yield {"done": True, "full": tokenizer.decode(generated)}
@@ -312,8 +320,7 @@ def room_join(room_id: str, req: JoinRequest):
         "device_id":    dev.device_id,
         "slice_id":     dev.slice_id,
         "layers":       [dev.layer_start, dev.layer_end],
-        "download_url": f"/slice/{dev.slice_id}",
-        "onnx_url":     f"/onnx/{dev.slice_id}",
+        "onnx_url":     f"{ONNX_CDN_BASE}/slice_{dev.slice_id}.onnx",
     }
 
 @app.get("/room/{room_id}/status")
@@ -490,7 +497,7 @@ async def infer(req: InferRequest):
             logits     = payload_to_tensor(logits_payload).numpy()
             next_token = int(np.argmax(logits[0, -1, :]))
             generated.append(next_token)
-            if next_token == GPT2_EOS:
+            if next_token in (QWEN_EOS, QWEN_EOS2):
                 break
 
     return {"input": req.text, "output": tokenizer.decode(generated)}

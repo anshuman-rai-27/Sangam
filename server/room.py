@@ -1,10 +1,10 @@
 """
 Room management — creates rooms, assigns model slice slots to devices.
 
-Fixed 3-slice model:
-  slot 0: layers  0-4  (embedding + first 4 transformer blocks)
-  slot 1: layers  4-8
-  slot 2: layers 8-12  (last 4 blocks + LM head)
+Qwen2.5-0.5B-Instruct: 24 transformer layers, 8 per slice.
+  slot 0: layers  0-7
+  slot 1: layers  8-15
+  slot 2: layers 16-23 + norm
 
 Browser workers store a WebSocket reference in `dev.ws`.
 Python workers store their HTTP URL in `dev.url`.
@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-SLICE_ASSIGNMENTS = [(0, 4), (4, 8), (8, 12)]
+SLICE_ASSIGNMENTS = [(0, 8), (8, 16), (16, 24)]
 NUM_SLICES = 3
 
 

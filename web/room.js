@@ -70,9 +70,9 @@ function setWsStatus(text, isErr) {
 // ── Room state rendering ──────────────────────────────────────────────────────
 
 const SLICE_LABELS = [
-  'blocks 0–3 (first)',
-  'blocks 4–7 (middle)',
-  'blocks 8–11 + ln (last)',
+  'layers 0–7 (first)',
+  'layers 8–15 (middle)',
+  'layers 16–23 + norm (last)',
 ];
 
 function updateRoom(data) {
@@ -160,14 +160,14 @@ async function joinAsWorker() {
   }
 
   mySliceId = assignment.slice_id;
-  setWorkerStatus(`assigned slice ${mySliceId} — downloading ONNX (~112 MB)…`);
+  setWorkerStatus(`assigned slice ${mySliceId} — downloading ONNX (~495 MB)…`);
   showDlBar(true);
 
-  // 2. Download ONNX with progress
+  // 2. Download ONNX with progress (URL comes from server — model-agnostic)
   let onnxBuffer;
   try {
-    const onnxUrl = `https://huggingface.co/anshumanrai/sangam-gpt2-slices/resolve/main/slice_${mySliceId}.onnx`;
-  onnxBuffer = await downloadWithProgress(onnxUrl, (pct) => {
+    const onnxUrl = assignment.onnx_url;
+    onnxBuffer = await downloadWithProgress(onnxUrl, (pct) => {
       document.getElementById('dl-bar').style.width = pct + '%';
       document.getElementById('dl-label').textContent = `downloading slice ${mySliceId}: ${pct}%`;
     });
