@@ -35,13 +35,23 @@ from server.room import RoomManager
 from shared.serialization import payload_to_tensor
 
 MODEL_SLICES_DIR = os.environ.get("MODEL_SLICES_DIR", "model_slices").strip()
-HF_REPO          = os.environ.get("HF_REPO", "anshumanrai/sangam-qwen-slices")
-# Full CDN base for browser ONNX downloads; override to serve from a different host
-ONNX_CDN_BASE    = os.environ.get(
-    "ONNX_CDN_BASE",
-    f"https://huggingface.co/{HF_REPO}/resolve/main",
-)
 WEB_DIR          = Path(__file__).parent.parent / "web"
+
+# ── Model registry ────────────────────────────────────────────────────────────
+# Add entries here for additional models. Each model needs its own HF repo with
+# slice_0.onnx, slice_1.onnx, slice_2.onnx, server_head.npz uploaded.
+_hf  = os.environ.get("HF_REPO",       "anshumanrai/sangam-qwen-slices")
+_cdn = os.environ.get("ONNX_CDN_BASE", f"https://huggingface.co/{_hf}/resolve/main")
+
+MODELS: Dict[str, dict] = {
+    "qwen2.5-0.5b": {
+        "name":         "Qwen2.5-0.5B-Instruct",
+        "description":  "0.5B parameter instruction-following / reasoning model",
+        "hf_repo":      _hf,
+        "onnx_cdn_base": _cdn,
+    },
+}
+DEFAULT_MODEL = next(iter(MODELS))
 
 QWEN_EOS  = 151645   # <|im_end|> token id in Qwen2.5 vocab
 QWEN_EOS2 = 151643   # <|endoftext|>
@@ -129,7 +139,8 @@ async def lifespan(app: FastAPI):
     # Server head weights
     head_path = os.path.join(MODEL_SLICES_DIR, "server_head.npz")
     if not os.path.isfile(head_path):
-        hf_url = f"https://huggingface.co/{HF_REPO}/resolve/main/server_head.npz"
+        _default_hf = MODELS[DEFAULT_MODEL]["hf_repo"]
+        hf_url = f"https://huggingface.co/{_default_hf}/resolve/main/server_head.npz"
         print(f"[server] downloading server_head.npz from {hf_url} …")
         os.makedirs(MODEL_SLICES_DIR, exist_ok=True)
         import urllib.request
@@ -286,6 +297,9 @@ class JoinRequest(BaseModel):
     device_id: str
     ram_mb:    int = 2048
 
+class CreateRoomRequest(BaseModel):
+    model: Optional[str] = None   # model key from MODELS registry; defaults to DEFAULT_MODEL
+
 
 # ─── Static pages ─────────────────────────────────────────────────────────────
 
@@ -306,9 +320,21 @@ def room_page(room_id: str):
 
 # ─── Room API ─────────────────────────────────────────────────────────────────
 
+@app.get("/models")
+def list_models():
+    return [
+        {"id": k, "name": v["name"], "description": v["description"]}
+        for k, v in MODELS.items()
+    ]
+
 @app.post("/room/create")
-def room_create():
-    return {"room_id": room_manager.create().room_id}
+def room_create(req: CreateRoomRequest = CreateRoomRequest()):
+    model_key = req.model or DEFAULT_MODEL
+    if model_key not in MODELS:
+        raise HTTPException(400, f"Unknown model '{model_key}'. Available: {list(MODELS)}")
+    m    = MODELS[model_key]
+    room = room_manager.create(model=model_key, model_name=m["name"])
+    return {"room_id": room.room_id, "model": model_key, "model_name": m["name"]}
 
 @app.post("/room/{room_id}/join")
 def room_join(room_id: str, req: JoinRequest):
@@ -316,11 +342,12 @@ def room_join(room_id: str, req: JoinRequest):
     dev  = room.join(req.device_id, req.ram_mb)
     if dev is None:
         raise HTTPException(409, "Room full — all 3 slice slots are taken")
+    cdn = MODELS.get(room.model, MODELS[DEFAULT_MODEL])["onnx_cdn_base"]
     return {
         "device_id":    dev.device_id,
         "slice_id":     dev.slice_id,
         "layers":       [dev.layer_start, dev.layer_end],
-        "onnx_url":     f"{ONNX_CDN_BASE}/slice_{dev.slice_id}.onnx",
+        "onnx_url":     f"{cdn}/slice_{dev.slice_id}.onnx",
     }
 
 @app.get("/room/{room_id}/status")

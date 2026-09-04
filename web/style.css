@@ -184,3 +184,29 @@ input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
 }
 .status-line.ready { color: var(--green); }
 .status-line.error { color: var(--red); }
+
+/* ── Model selector (index page) ── */
+.model-select-wrap {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.model-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.8px; color: var(--muted);
+}
+.model-select {
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 6px; padding: 8px 10px;
+  font-size: 13px; font-family: inherit; outline: none; cursor: pointer;
+  width: 100%;
+}
+.model-select:focus { border-color: var(--accent); }
+.model-desc {
+  font-size: 11px; color: var(--muted); min-height: 14px;
+}
+
+/* ── Model badge (room header) ── */
+.model-badge {
+  background: rgba(88,166,255,.1); border: 1px solid rgba(88,166,255,.25);
+  color: var(--accent); border-radius: 6px; padding: 3px 10px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}

@@ -14,6 +14,15 @@
     </div>
 
     <div class="action-card">
+      <!-- Model selector -->
+      <div class="model-select-wrap">
+        <label class="model-label" for="model-select">Model</label>
+        <select id="model-select" class="model-select">
+          <option value="" disabled selected>Loading models…</option>
+        </select>
+        <div id="model-desc" class="model-desc"></div>
+      </div>
+
       <button class="btn-primary" id="btn-create" onclick="createRoom()">
         Create new room
       </button>
@@ -30,12 +39,48 @@
   </div>
 
   <script>
+    let _models = [];
+
+    async function loadModels() {
+      try {
+        const resp = await fetch('/models');
+        _models = await resp.json();
+        const sel = document.getElementById('model-select');
+        sel.innerHTML = '';
+        _models.forEach((m, i) => {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.name;
+          if (i === 0) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        updateDesc();
+      } catch (e) {
+        document.getElementById('model-select').innerHTML = '<option value="">Failed to load models</option>';
+      }
+    }
+
+    function updateDesc() {
+      const sel = document.getElementById('model-select');
+      const m = _models.find(x => x.id === sel.value);
+      document.getElementById('model-desc').textContent = m ? m.description : '';
+    }
+
+    document.getElementById('model-select').addEventListener('change', updateDesc);
+    loadModels();
+
     async function createRoom() {
       const btn = document.getElementById('btn-create');
+      const model = document.getElementById('model-select').value;
+      if (!model) { document.getElementById('err').textContent = 'Select a model first.'; return; }
       btn.disabled = true;
       btn.textContent = 'Creating…';
       try {
-        const resp = await fetch('/room/create', { method: 'POST' });
+        const resp = await fetch('/room/create', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ model }),
+        });
         const { room_id } = await resp.json();
         window.location.href = `/room/${room_id}`;
       } catch (e) {

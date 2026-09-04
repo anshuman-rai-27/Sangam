@@ -79,6 +79,12 @@ function updateRoom(data) {
   const ready = data.ready_count  ?? 0;
   const total = data.total_slots  ?? 3;
 
+  // Update model badge in header if present
+  if (data.model_name) {
+    const badge = document.getElementById('model-badge');
+    if (badge) badge.textContent = data.model_name;
+  }
+
   document.getElementById('pipeline-fill').style.width = `${(ready / total) * 100}%`;
 
   const lbl = document.getElementById('pipeline-label');

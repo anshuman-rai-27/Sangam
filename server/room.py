@@ -49,8 +49,10 @@ class RoomDevice:
 
 @dataclass
 class Room:
-    room_id: str
-    slots:   Dict[int, Optional[RoomDevice]] = field(
+    room_id:    str
+    model:      str = "qwen2.5-0.5b"
+    model_name: str = "Qwen2.5-0.5B-Instruct"
+    slots:      Dict[int, Optional[RoomDevice]] = field(
         default_factory=lambda: {i: None for i in range(NUM_SLICES)}
     )
 
@@ -115,6 +117,8 @@ class Room:
     def to_dict(self) -> dict:
         return {
             "room_id":        self.room_id,
+            "model":          self.model,
+            "model_name":     self.model_name,
             "devices":        [d.to_dict() for d in self.slots.values() if d is not None],
             "pipeline_ready": self.pipeline_ready,
             "ready_count":    self.ready_count(),
@@ -126,9 +130,9 @@ class RoomManager:
     def __init__(self):
         self._rooms: Dict[str, Room] = {}
 
-    def create(self) -> Room:
+    def create(self, model: str = "qwen2.5-0.5b", model_name: str = "Qwen2.5-0.5B-Instruct") -> Room:
         room_id = uuid.uuid4().hex[:8]
-        room = Room(room_id=room_id)
+        room = Room(room_id=room_id, model=model, model_name=model_name)
         self._rooms[room_id] = room
         return room
 
