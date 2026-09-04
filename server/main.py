@@ -340,12 +340,18 @@ def room_join(room_id: str, req: JoinRequest):
     dev  = room.join(req.device_id, req.ram_mb)
     if dev is None:
         raise HTTPException(409, "Room full — all 3 slice slots are taken")
-    cdn = MODELS.get(room.model, MODELS[DEFAULT_MODEL])["onnx_cdn_base"]
+    local_path = Path(MODEL_SLICES_DIR) / f"slice_{dev.slice_id}.onnx"
+    if local_path.is_file():
+        # Serve directly from this server (local dev / self-hosted)
+        onnx_url = f"/onnx/{dev.slice_id}"
+    else:
+        cdn = MODELS.get(room.model, MODELS[DEFAULT_MODEL])["onnx_cdn_base"]
+        onnx_url = f"{cdn}/slice_{dev.slice_id}.onnx"
     return {
         "device_id":    dev.device_id,
         "slice_id":     dev.slice_id,
         "layers":       [dev.layer_start, dev.layer_end],
-        "onnx_url":     f"{cdn}/slice_{dev.slice_id}.onnx",
+        "onnx_url":     onnx_url,
     }
 
 @app.get("/room/{room_id}/status")
