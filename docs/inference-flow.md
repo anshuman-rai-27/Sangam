@@ -140,3 +140,31 @@ Device → Server:
 ```
 
 A sequence of length 12 costs `1 × 12 × 896 × 4 bytes ≈ 43 KB` per device hop, or ~86 KB total per token (two round-trips: server→device and device→server, ×3 devices).
+
+---
+
+## Multiple Pass Cycles Per Input
+
+Even a single word input like **"hello"** triggers **multiple complete pipeline cycles** — one per output token.
+
+```
+You type: "hello"  →  12 tokens after chat template wrapping
+
+Cycle 1:  12 tokens → Device 0 → Device 1 → Device 2 → " Hi"
+Cycle 2:  13 tokens → Device 0 → Device 1 → Device 2 → ","
+Cycle 3:  14 tokens → Device 0 → Device 1 → Device 2 → " how"
+Cycle 4:  15 tokens → Device 0 → Device 1 → Device 2 → " can"
+Cycle 5:  16 tokens → Device 0 → Device 1 → Device 2 → " I"
+Cycle 6:  17 tokens → Device 0 → Device 1 → Device 2 → " help"
+Cycle 7:  18 tokens → Device 0 → Device 1 → Device 2 → " you"
+Cycle 8:  19 tokens → Device 0 → Device 1 → Device 2 → "?"
+Cycle 9:  20 tokens → Device 0 → Device 1 → Device 2 → <EOS> → stop
+```
+
+Each word that appears in the UI = one full cycle completing.
+
+### Key points
+
+- The **entire sequence** (not just the new token) passes through all 3 devices on every cycle.
+- The tensor grows by 1 each cycle → generation gets **slightly slower** as the response gets longer.
+- This is **KV-cache-less decoding** — past key/value states are recomputed from scratch every cycle rather than cached, which is simpler to implement across distributed ONNX workers but less efficient than a local LLM.
