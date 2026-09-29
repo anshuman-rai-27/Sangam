@@ -8,6 +8,22 @@ Devices join via a website, each browser downloads its model slice, and compute 
 
 ---
 
+## Demo
+
+**Main room** — create a room, watch devices join and the pipeline become ready:
+
+https://github.com/anshuman-rai-27/Sangam/raw/main/recordings/main_room.webm
+
+**Worker 1 / 2 / 3** — each browser tab downloads its assigned ONNX slice and joins as a worker:
+
+https://github.com/anshuman-rai-27/Sangam/raw/main/recordings/worker_1.webm
+
+https://github.com/anshuman-rai-27/Sangam/raw/main/recordings/worker_2.webm
+
+https://github.com/anshuman-rai-27/Sangam/raw/main/recordings/worker_3.webm
+
+---
+
 ## How it works
 
 ```
