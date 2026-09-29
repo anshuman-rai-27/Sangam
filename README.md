@@ -1,8 +1,10 @@
 # Sangam
 
-Distributed ML inference — GPT-2 Small (117M) split across 3 devices, orchestrated by a central server.
-Devices join via a website, each browser downloads its model slice (~113 MB), and compute together.
+Distributed ML inference — split a language model across devices, orchestrated by a central server.
+Devices join via a website, each browser downloads its model slice, and compute together.
 **No Python or install required on participant devices — just a browser.**
+
+**Live demo: https://sangam-v2.onrender.com**
 
 ---
 
